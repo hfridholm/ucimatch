@@ -15,14 +15,6 @@ char fen[256] = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 Table table;
 
 
-typedef struct
-{
-  char address[64];
-  int port;
-  char name[64];
-  int sockfd;
-} Engine;
-
 /*
  * Parse the current passed flag
  *
@@ -57,161 +49,74 @@ void flags_parse(int argc, char* argv[])
   }
 }
 
-int address_port_lookup(char* address, int* port, const char* name)
-{
-  return 1;
-}
-
 /*
- * socket_write, with new-line character
- *
- * RETURN (same as socket_write)
- * - SUCCESS | The number of written characters
- * - ERROR   | -1
+ * Keyboard interrupt - close the program (the threads)
  */
-int engine_write(int sockfd, const char* string, size_t size)
+void sigint_handler(int signum)
 {
-  char buffer[size + 1];
-
-  sprintf(buffer, "%s\n", string);
-
-  return socket_write(sockfd, buffer, strlen(buffer));
+  if(debug) info_print("Keyboard interrupt");
 }
 
-/*
- * socket_read, without new-line character
- *
- * RETURN (same as socket_read)
- * - SUCCESS | The number of read characters
- * - ERROR   | -1
- */
-int engine_read(int sockfd, char* string, size_t size)
+void sigint_handler_setup(void)
 {
-  char buffer[size + 1];
-  memset(buffer, '\0', sizeof(buffer));
+  struct sigaction sigAction;
 
-  int status = socket_read(sockfd, buffer, size + 1);
+  sigAction.sa_handler = sigint_handler;
+  sigAction.sa_flags = 0;
+  sigemptyset(&sigAction.sa_mask);
 
-  if(status == -1) return -1;
-
-  strncpy(string, buffer, size);
-
-  return status;
+  sigaction(SIGINT, &sigAction, NULL);
 }
 
-/*
- * Check uci compatibility and save the engine's name
- */
-int engine_greet(Engine* engine, int sockfd)
+void sigusr1_handler(int signum) {}
+
+void sigusr1_handler_setup(void)
 {
-  engine->sockfd = sockfd;
+  struct sigaction sigAction;
 
-  if(engine_write(sockfd, "uci", 3) != 3) return 1;
+  sigAction.sa_handler = sigusr1_handler;
+  sigAction.sa_flags = 0;
+  sigemptyset(&sigAction.sa_mask);
 
-  char buffer[1024];
-  do 
-  {
-    memset(buffer, '\0', sizeof(buffer));
-
-    if(engine_read(sockfd, buffer, sizeof(buffer)) == -1) return 2;
-
-    // Save the engine's name
-    if(!strncmp(buffer, "id name ", 8))
-    {
-      strcpy(engine->name, buffer + 8);
-    }
-  }
-  while(strcmp(buffer, "uciok"));
-
-  return 0;
+  sigaction(SIGUSR1, &sigAction, NULL);
 }
 
-int engine_create(Engine* engine, const char* address, int port)
+void signals_handler_setup(void)
 {
-  int sockfd = client_socket_create(address, port, true);
+  signal(SIGPIPE, SIG_IGN); // Ignores SIGPIPE
+  
+  sigint_handler_setup();
 
-  if(sockfd == -1) return 1;
-
-  strcpy(engine->address, address);
-  engine->port = port;
-
-  if(engine_greet(engine, sockfd) != 0)
-  {
-    socket_close(&sockfd, true);
-    
-    return 2;
-  }
-  return 0; // Success!
-}
-
-/*
- * RETURN
- * - 0 | ERROR
- * - 1 | Successfully parsed address and port from string
- * - 2 | Successfully looked up address and port from name (string)
- */
-int address_port_get(char* address, int* port, const char* string, int length)
-{
-  if(address_port_parse(address, port, string, length) == 0) return 1;
-
-  if(address_port_lookup(address, port, string) == 0) return 2;
-
-  return 0; // ERROR
-}
-
-int engine_parse(Engine* engine, const char* string, int length)
-{
-  char address[64];
-  int port;
-
-  // 1. Get address and port of chess engine
-  if(address_port_get(address, &port, string, length) == 0) return 1;
-
-  // 2. Create engine struct and connect to the engine socket
-  if(engine_create(engine, address, port) != 0) return 2;
-
-  // 3. Remove every instance of address and port in lookup table
-  table_address_port_delete(&table, address, port);
-
-  // 4. Add new instance of address and port in lookup table
-
-  return 0;
+  sigusr1_handler_setup();
 }
 
 int main(int argc, char* argv[])
 {
   flags_parse(argc, argv);
 
-  if(argc >= 2)
-  {
-    printf("String: (%s)\n", argv[1]);
-
-    char address[64];
-    int port;
-
-    if(address_port_parse(address, &port, argv[1], strlen(argv[1])) == 0)
-    {
-      printf("Address: (%s) Port: (%d)\n", address, port);
-    }
-    else printf("Failed to parse address and port\n");
-  }
+  signals_handler_setup();
 
   table_load(&table);
 
-  for(int i = 0; i < table.amount; i++)
+  table_print(table);
+
+  if(argc >= 2)
   {
-    TableEngine engine = table.engines[i];
+    Engine engine;
 
-    printf("%s", engine.name);
-
-    for(int j = 0; j < engine.amount; j++)
+    if(engine_parse(&engine, table, argv[1]) == 0)
     {
-      TableEngineServer server = engine.servers[j];
+      info_print("sockfd: %d", engine.sockfd);
 
-      printf(",%s:%d", server.address, server.port);
+      socket_close(&engine.sockfd, true);
     }
-    printf("\n");
+    else
+    {
+      error_print("Failed to parse engine: (%s)", argv[1]);
+    }
   }
+
+  table_print(table);
 
   /*
   if(argc < 3) // Not enough passed arguments to execute

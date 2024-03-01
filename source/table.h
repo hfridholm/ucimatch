@@ -6,6 +6,16 @@
 #include <string.h>
 #include <stdlib.h>
 
+// Engine
+typedef struct
+{
+  char address[64];
+  int port;
+  char name[64];
+  int sockfd;
+} Engine;
+
+// Table
 typedef struct
 {
   char address[64];
@@ -27,8 +37,8 @@ typedef struct
 
 extern int table_load(Table* table);
 
-extern int address_port_parse(char* address, int* port, const char* string, int length);
+extern int engine_parse(Engine* engine, Table table, const char* string);
 
-extern int table_address_port_delete(Table* table, const char* address, int port);
+extern void table_print(Table table);
 
 #endif // TABLE_H

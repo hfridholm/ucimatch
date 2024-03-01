@@ -1,4 +1,120 @@
 #include "table.h"
+#include "socket.h"
+
+void table_print(Table table)
+{
+  for(int i = 0; i < table.amount; i++)
+  {
+    TableEngine engine = table.engines[i];
+
+    printf("%s", engine.name);
+
+    for(int j = 0; j < engine.amount; j++)
+    {
+      TableEngineServer server = engine.servers[j];
+
+      printf(",%s:%d", server.address, server.port);
+    }
+    printf("\n");
+  }
+}
+
+/*
+ * socket_write, with new-line character
+ *
+ * RETURN (same as socket_write)
+ * - SUCCESS | The number of written characters
+ * - ERROR   | -1
+ */
+int engine_write(int sockfd, const char* string, size_t size)
+{
+  char buffer[size + 1];
+
+  sprintf(buffer, "%s\n", string);
+
+  info_print("engine_write(%s)", string);
+
+  return socket_write(sockfd, buffer, strlen(buffer));
+}
+
+/*
+ * socket_read, without new-line character
+ *
+ * RETURN (same as socket_read)
+ * - SUCCESS | The number of read characters
+ * - ERROR   | -1
+ */
+int engine_read(int sockfd, char* string, size_t size)
+{
+  char buffer[size + 1];
+  memset(buffer, '\0', sizeof(buffer));
+
+  int status = socket_read(sockfd, buffer, size + 1);
+
+  if(status == -1) return -1;
+
+  strncpy(string, buffer, strlen(buffer) - 1);
+
+  info_print("engine_read(%s)", string);
+
+  return status;
+}
+
+/*
+ * Check uci compatibility and save the engine's name
+ *
+ * RETURN
+ * - 0 | Success!
+ * - 1 | Failed to write to engine via socket
+ * - 2 | Failed to read from engine via socket
+ */
+static int engine_greet(Engine* engine, int sockfd)
+{
+  engine->sockfd = sockfd;
+
+  if(engine_write(sockfd, "uci", 3) != 3) return 1;
+
+  char buffer[1024];
+  do 
+  {
+    memset(buffer, '\0', sizeof(buffer));
+
+    if(engine_read(sockfd, buffer, sizeof(buffer)) == -1) return 2;
+
+    // Save the engine's name
+    if(!strncmp(buffer, "id name ", 8))
+    {
+      strcpy(engine->name, buffer + 8);
+    }
+  }
+  while(strcmp(buffer, "uciok") != 0);
+
+  return 0;
+}
+
+/*
+ * RETURN
+ * - 0 | Success!
+ * - 1 | Failed to create client socket
+ * - 2 | Failed to greet engine with uci
+ */
+static int address_port_engine_create(Engine* engine, const char* address, int port)
+{
+  int sockfd = client_socket_create(address, port, true);
+
+  if(sockfd == -1) return 1;
+
+  strcpy(engine->address, address);
+  engine->port = port;
+
+  if(engine_greet(engine, sockfd) != 0)
+  {
+    socket_close(&sockfd, true);
+    
+    return 2;
+  }
+  return 0; // Success!
+}
 
 /*
  * RETURN
@@ -67,11 +183,15 @@ int table_address_port_delete(Table* table, const char* address, int port)
  */
 TableEngine* table_engine_address_port_add(TableEngine* engine, const char* address, int port)
 {
-  TableEngineServer* server = &engine->servers[++engine->amount];
+  TableEngineServer server;
 
-  strcpy(server->address, address);
-  server->port = port;
+  strcpy(server.address, address);
+  server.port = port;
 
+  engine->servers[engine->amount] = server;
+  
+  engine->amount++;
+  
   return engine;
 }
 
@@ -80,9 +200,13 @@ TableEngine* table_engine_address_port_add(TableEngine* engine, const char* addr
  */
 Table* table_address_port_add(Table* table, const char* name, const char* address, int port)
 {
+  info_print("table amount: %d", table->amount);
+
   for(int index = 0; index < table->amount; index++)
   {
     TableEngine* engine = &table->engines[index];
+
+    info_print("engine amount: %d", engine->amount);
 
     if(!strcmp(engine->name, name))
     {
@@ -92,11 +216,14 @@ Table* table_address_port_add(Table* table, const char* name, const char* addres
     }
   }
   // If no engine already exist, create a new one
-  TableEngine* engine = &table->engines[++table->amount];
+  // Maybe have to initialize and then allocate?
+  TableEngine engine;
 
-  strcpy(engine->name, name);
+  strcpy(engine.name, name);
 
-  table_engine_address_port_add(engine, address, port);
+  table_engine_address_port_add(&engine, address, port);
+  
+  table->engines[++table->amount] = engine;
 
   return table;
 }
@@ -117,14 +244,52 @@ int table_save(Table table)
   return 0;
 }
 
+/*
+ * Create a chess engine out of a table engine
+ *
+ * RETURN
+ * - 0 | Success!
+ * - 1 | Failed to create engine out of table engine
+ */
+int table_engine_lookup_engine_create(Engine* engine, TableEngine tableEngine)
+{
+  for(int index = 0; index < tableEngine.amount; index++)
+  {
+    TableEngineServer server = tableEngine.servers[index];
+
+    if(address_port_engine_create(engine, server.address, server.port) == 0) return 0;
+  }
+  return 1;
+}
+
+/*
+ * Create a chess engine by looking up the name of an engine in the table
+ *
+ * RETURN
+ * - 0 | Success!
+ * - 1 | Failed to lookup and create a chess engine
+ */
+int table_lookup_engine_create(Engine* engine, Table table, const char* name)
+{
+  for(int index = 0; index < table.amount; index++)
+  {
+    TableEngine tableEngine = table.engines[index];
+
+    if(strcmp(tableEngine.name, name) != 0) continue;
+
+    if(table_engine_lookup_engine_create(engine, tableEngine) == 0) return 0;
+  }
+  return 1;
+}
+
 // Tip: use strtok to seperate address and port at ':'
-int address_port_parse(char* address, int* port, const char* string, int length)
+int address_port_parse(char* address, int* port, const char* string)
 {
   if(address == NULL || port == NULL) return 1;
 
   char tempAddress[64];
 
-  for(int index = 0; index < length - 1; index += 1)
+  for(int index = 0; index < strlen(string) - 1; index += 1)
   {
     if(string[index] == ':')
     {
@@ -162,7 +327,7 @@ int table_line_parse(TableEngine* engine, char* line)
   {
     TableEngineServer server;
 
-    if(address_port_parse(server.address, &server.port, token, strlen(token)) == 0)
+    if(address_port_parse(server.address, &server.port, token) == 0)
     {
       engine->servers[engine->amount++] = server;
     }
@@ -240,4 +405,62 @@ int table_load(Table* table)
     }
   }
   return table->amount;
+}
+
+/*
+ * Create engine from inputted string
+ *
+ * RETURN
+ * - 0 | Error
+ * - 1 | Created engine by parsing string as address and port
+ * - 2 | Created engine by looking up name in engine table
+ */
+static int engine_create(Engine* engine, Table table, const char* string)
+{
+  char address[64];
+  int port;
+
+  if(address_port_parse(address, &port, string) == 0)
+  {
+    int status = address_port_engine_create(engine, address, port);
+
+    return (status != 0) ? 0 : 1;
+  }
+  else // If the string could not be parsed into address and port,
+      // try looking up the name in the engine table
+  {
+    int status = table_lookup_engine_create(engine, table, string);
+
+    return (status != 0) ? 0 : 2;
+  }
+}
+
+void engine_print(Engine engine)
+{
+  printf("Name\t: %s\n", engine.name);
+  printf("Address\t: %s\n", engine.address);
+  printf("Port\t: %d\n", engine.port);
+}
+
+/*
+ * Parse engine from inputted string, and update table content
+ *
+ * RETURN
+ * - 0 | Success!
+ * - 1 | Failed to parse engine from string
+ */
+int engine_parse(Engine* engine, Table table, const char* string)
+{
+  // 1. Create engine, either a new engine or lookup existing engine
+  if(engine_create(engine, table, string) == 0) return 1;
+
+  engine_print(*engine);
+
+  // 3. Remove every instance of address and port in lookup table
+  table_address_port_delete(&table, engine->address, engine->port);
+
+  // 4. Add new instance of address and port in lookup table
+  table_address_port_add(&table, engine->name, engine->address, engine->port);
+
+  return 0;
 }
